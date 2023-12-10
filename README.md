@@ -1,0 +1,1 @@
+python3 main.py --init-method tcp://127.0.0.1:23456 --rank 0 --world-size 2
