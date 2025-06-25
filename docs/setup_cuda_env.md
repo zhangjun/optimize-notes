@@ -1,5 +1,7 @@
 # nvcc
 ```shell
+distro=ubuntu2204
+arch=x86_64
 wget https://developer.download.nvidia.com/compute/cuda/repos/<distro>/<arch>/cuda-keyring_1.1-1_all.deb
 # or curl -fsSLO https://developer.download.nvidia.com/compute/cuda/repos/<distro>/<arch>/cuda-keyring_1.1-1_all.deb
 dpkg -i cuda-keyring_1.1-1_all.deb
