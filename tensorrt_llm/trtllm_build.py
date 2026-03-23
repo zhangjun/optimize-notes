@@ -99,21 +99,21 @@ def main(args):
     build_config = BuildConfig(
         max_num_tokens=4096,
         max_batch_size=48,
-        max_seq_len=32768,
-        max_input_len=32768-2048,
+        max_seq_len=args.max_model_len,
+        max_input_len=args.max_model_len-2048,
         max_beam_width=1
     )
     build_cache_config = BuildCacheConfig(cache_root=Path("./tmp/trt_caches"))
     llm_args = {
         "workspace": "./tmp/",
         "enable_build_cache": build_cache_config,
+        "enable_chunked_prefill": True,
     }
-    model_path = "/mnt/data/zhangjun/mydev/models/qw25_2050_agent_ppt_coder_0520_0528"
     llm = LLM(
         # model="/mnt/data/zhangjun/mydev/trtllm/tmp/qwen32b/Qwen/Qwen2.5-32B-Instruct/tp_2_pp_1/",
-        model=model_path,
-        tokenizer = model_path,
-        tensor_parallel_size=2,
+        model = args.model_path,
+        tokenizer = args.model_path,
+        tensor_parallel_size=args.tp_size,
         quant_config=quant_config,
         # calib_config=calib_config,
         build_config=build_config,
@@ -127,7 +127,7 @@ def main(args):
         return
 
     # Sample prompts.
-    prompt = get_prompt(model_path)
+    prompt = get_prompt(args.model_path)
     prompts = [
         prompt,
     ]
@@ -157,5 +157,16 @@ if __name__ == '__main__':
                         action='store_true',
                         default=False,
                         help='Building and save engines')
+    parser.add_argument('--model_path',
+                        type=str,
+                        help='Model path')
+    parser.add_argument('--max_model_len',
+                        type=int,
+                        default=131072,
+                        help='Max model length')
+    parser.add_argument('--tp_size',
+                        type=int,
+                        default=2,
+                        help='Tensor parallel size')
     args = parser.parse_args()    
     main(args)
