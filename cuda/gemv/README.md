@@ -146,14 +146,75 @@ GEMV 不一定 occupancy 越高越好，常要平衡：
 - `M` 很小时并行度可能不足
 - `K` 很小时 lane 利用率低，可能被其它映射反超
 
-## 5. 最小可跑实验建议
+## 5. Batched GEMV 优化
 
-可对比以下版本：
+当需要同时计算多个向量时：
+
+$$
+Y = A \cdot X,\quad A\in\mathbb{R}^{M\times K},\ X\in\mathbb{R}^{K\times B},\ Y\in\mathbb{R}^{M\times B}
+$$
+
+这可以理解为 **batched GEMV**（也可视为小 `N` 的 GEMM）。
+
+核心收益：
+
+- 提升并行度：把原本“单向量”扩展到 `B` 个向量并行
+- 更好隐藏访存延迟
+- 更容易走到 Tensor Core 友好的计算形态
+
+本文代码中的 batched 版本（`main.cu`）包含：
+
+- `bg_v0`: naive（每线程算一个 `Y[row, col]`）
+- `bg_v1`: warp-per-output（每个 warp 协作一个输出）
+- `bg_v2`: `A` 分块到 shared memory，减少重复读取
+- `bg_v3`: `bg_v2` + `float4` 向量化读取（更高吞吐）
+
+## 6. Tensor Core 优化（WMMA）
+
+对 FP16/BF16 输入、FP32 累加场景，常见路径是把 batched GEMV 重写成小 GEMM，再用 Tensor Core：
+
+- 数据类型：`__half` 输入
+- 累加：FP32 accumulator
+- tile：`16x16x16`（WMMA 基础 tile）
+
+代码中给了 `bg_tc_wmma_fp16` 示例（`wmma::mma_sync`），适用条件：
+
+- `M`、`K`、`BATCH` 最好是 16 的倍数
+- GPU 架构支持 Tensor Core（Volta+）
+
+实践建议：
+
+- 用 FP32 reference 做误差对比（`max_abs_diff`）
+- 观察吞吐指标（TFLOPS）而不是只看时间
+- 注意 half 精度误差会高于纯 FP32 路径
+
+## 7. 自动选择策略（工程实用）
+
+`main.cu` 增加了一个简化版自动选择器（`select_batched_kernel`），用于在 batched 路径里根据形状与硬件条件快速决策：
+
+- 若 Tensor Core 可用，且 `M/K/BATCH` 都是 16 的倍数，同时 `K`、`BATCH` 足够大：优先 `bg_tc_wmma_fp16`
+- 否则若 `K % 4 == 0` 且 `BATCH >= 8`：选 `bg_v3`（tile + float4）
+- 否则 `K >= 256`：选 `bg_v2`
+- 其它小规模场景：退回 `bg_v1`
+
+这个规则是经验启发式，不同 GPU（如 Ada/Hopper）阈值可能不同，建议用 Nsight 或实测结果再微调阈值。
+
+## 8. 最小可跑实验建议
+
+可对比以下版本（单向量 GEMV）：
 
 1. `v0`: 每行一个线程（naive）
 2. `v1`: warp-per-row + shuffle reduce
 3. `v2`: v1 + `float4` 向量化
 4. `v3`: v2 + `x` 分块共享内存
+
+并额外对比 batched/Tensor Core：
+
+1. `bg_v0`: batched naive
+2. `bg_v1`: batched warp-per-output
+3. `bg_v2`: batched + tile shared memory
+4. `bg_v3`: batched + tile shared memory + float4
+5. `bg_tc_wmma_fp16`: batched Tensor Core
 
 建议固定：
 
@@ -168,7 +229,9 @@ nvcc -O3 -arch=sm_80 -lineinfo -o gemv main.cu
 ./gemv
 ```
 
-## 6. 常见坑
+> 若要跑 WMMA/Tensor Core 路径，`-arch` 需至少支持 Tensor Core（如 `sm_70+`，推荐 `sm_80`）。
+
+## 9. 常见坑
 
 - **对齐问题**：`float4` 读取地址未对齐会退化甚至非法访问
 - **边界处理**：`M`、`K` 非 block/warp 整倍数时要 guard
@@ -176,14 +239,14 @@ nvcc -O3 -arch=sm_80 -lineinfo -o gemv main.cu
 - **过度用 shared memory**：smem 太大可能压低 occupancy
 - **只看 kernel 时间不看带宽**：GEMV 优化应结合有效带宽（GB/s）评估
 
-## 7. 进一步方向
+## 10. 进一步方向
 
 - 混合精度（FP16/BF16 输入 + FP32 accumulate）
-- 使用 Tensor Core 友好路径（在可重排/可分块场景）
-- batched GEMV（把多个向量合并，提升并行度）
+- batched GEMV 的自适应调度（按 `M/K/B` 动态选 kernel）
+- Tensor Core 路径的双缓冲（cp.async + pipeline）
 - 融合算子（GEMV + bias/activation）减少中间写回
 
-## 参考
+## 11. 参考
 
 - [NVIDIA CUDA C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html)
 - [NVIDIA CUDA Best Practices Guide](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html)
