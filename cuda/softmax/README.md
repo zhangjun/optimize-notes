@@ -8,51 +8,51 @@ https://github.com/Starmys/TritonStudyGroup/blob/main/1_CUDA_Softmax/csrc/better
 
 $$Sofmax(x_i)= \frac{e^{x_i}}{\sum_j{e^{x_j}}}$$
 
-- naive softmax
+#### naive softmax
   
-  直接按定义计算（不做平移）：
+直接按定义计算（不做平移）：
 
-  $$
-  y_i = \frac{e^{x_i}}{\sum_{j=1}^{N} e^{x_j}}
-  $$
+$$
+y_i = \frac{e^{x_i}}{\sum_{j=1}^{N} e^{x_j}}
+$$
 
-  其中分母记为：
+其中分母记为：
 
-  $$
-  d = \sum_{j=1}^{N} e^{x_j}
-  $$
+$$
+d = \sum_{j=1}^{N} e^{x_j}
+$$
 
-  则：
+则：
 
-  $$
-  y_i = \frac{e^{x_i}}{d}
-  $$
+$$
+y_i = \frac{e^{x_i}}{d}
+$$
 
-- safe softmax
+#### safe softmax
   
-  先减去最大值再做指数，提升数值稳定性。设：
+先减去最大值再做指数，提升数值稳定性。设：
 
-  $$
-  m = \max_{1 \le j \le N} x_j
-  $$
+$$
+m = \max_{1 \le j \le N} x_j
+$$
 
-  则：
+则：
 
-  $$
-  y_i = \frac{e^{x_i - m}}{\sum_{j=1}^{N} e^{x_j - m}}
-  $$
+$$
+y_i = \frac{e^{x_i - m}}{\sum_{j=1}^{N} e^{x_j - m}}
+$$
 
-  分母记为：
+分母记为：
 
-  $$
-  d = \sum_{j=1}^{N} e^{x_j - m}
-  $$
+$$
+d = \sum_{j=1}^{N} e^{x_j - m}
+$$
 
-  所以：
+所以：
 
-  $$
-  y_i = \frac{e^{x_i - m}}{d}
-  $$
+$$
+y_i = \frac{e^{x_i - m}}{d}
+$$
 
 ### cuda naive impl
 
