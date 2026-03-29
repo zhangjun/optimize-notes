@@ -4,6 +4,7 @@
 #define WARP_SIZE 32
 #define FLT_MAX ((float)(1e10))
 #define WARP_MASK 0xFFFFFFFF
+// #define RAND_MAX 1024
 
 // https://zhuanlan.zhihu.com/p/1964020134839576011
 // warp_reduce
@@ -29,14 +30,13 @@ struct Max {
     }
 };
 
-// softmax basic impl
-__global__ void softmax_basic(float *input, float *output, 
+// reduce basic impl
+__global__ void reduce_basic(float *input, float *output, 
     int batch_size, int dim) {
     int row_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (row_idx >= batch_size) return;
 
     float *row_input = input + row_idx * dim;
-    float *row_output = output + row_idx * dim;
 
     // 阶段 1: 查找最大值
     float max_val = row_input[0];
@@ -44,20 +44,11 @@ __global__ void softmax_basic(float *input, float *output,
         max_val = fmaxf(max_val, row_input[i]);
     }
 
-    // 阶段 2: 计算指数和
-    float sum_exp = 0.0f;
-    for (int i = 0; i < dim; i++) {
-        sum_exp += __expf(row_input[i] - max_val);
-    }
-
-    // 阶段 3: 归一化
-    for (int i = 0; i < dim; i++) {
-        row_output[i] = __expf(row_input[i] - max_val) / sum_exp;
-    }
+    output[row_idx] = max_val;
 }
 
-// softmax (one block for one row)
-__global__ void softmax_one_block_for_one_row(float *input, float *output, 
+// reduce (one block for one row)
+__global__ void reduce_one_block_for_one_row(float *input, float *output, 
     int batch_size, int dim) {
     int batch_idx = blockIdx.x;
     int tid = threadIdx.x;
@@ -81,32 +72,11 @@ __global__ void softmax_one_block_for_one_row(float *input, float *output,
         __syncthreads();
     }
     float max_val = shared_mem[0];
-
-    // 阶段 2: 并行 sum 归约（类似模式）
-    float sum_exp = 0.0f;
-    for (int i = tid; i < dim; i += blockDim.x) {
-        sum_exp += __expf(input[batch_idx * dim + i] - max_val);
-    }
-    shared_mem[tid] = sum_exp;
-    __syncthreads();
-
-    // 树形归约
-    for (int stride = blockDim.x/2; stride > 0; stride /= 2) {
-        if (tid < stride) {
-            shared_mem[tid] += shared_mem[tid + stride];
-        }
-        __syncthreads();
-    }
-    sum_exp = shared_mem[0];
-
-    // 阶段 3: 并行归一化
-    for (int i = tid; i < dim; i += blockDim.x) {
-        output[batch_idx * dim + i] = __expf(input[batch_idx * dim + i] - max_val) / sum_exp;
-    }
+    output[batch_idx] = max_val;
 }
 
-// softmax (one warp for one row)
-__global__ void softmax_one_warp_for_one_row(float *input, float *output, 
+// reduce (one warp for one row, using warp_reduce)
+__global__ void reduce_one_warp_for_one_row(float *input, float *output, 
     int batch_size, int dim) {
 
     int lane_id = threadIdx.x % WARP_SIZE;
@@ -121,51 +91,78 @@ __global__ void softmax_one_warp_for_one_row(float *input, float *output,
         max_val = fmaxf(max_val, input[offset + i]);
     }
     max_val = warp_reduce<float, WARP_SIZE, Max>(max_val);
-
-    float sum_exp = 0.0f;
-    for (int i = lane_id; i < dim; i += WARP_SIZE) {
-        sum_exp += __expf(input[offset + i] - max_val);
-    }
-    sum_exp = warp_reduce<float, WARP_SIZE, Add>(sum_exp);
-
-    for (int i = lane_id; i < dim; i += WARP_SIZE) {
-        output[offset + i] = __expf(input[offset + i] - max_val) / sum_exp;
-    }
+    output[cur_row] = max_val;
 }
 
 
-void benchmark_softmax(float *input, float *output, 
+void benchmark_reduce(float *input, float *output, 
     int batch_size, int dim) {
     cudaEvent_t start, end;
     cudaEventCreate(&start);
     cudaEventCreate(&end);
     cudaEventRecord(start);
-    softmax_one_warp_for_one_row<<<batch_size, 128>>>(input, output, batch_size, dim);
+    reduce_one_warp_for_one_row<<<batch_size, 128>>>(input, output, batch_size, dim);
+    // reduce_one_block_for_one_row<<<batch_size, 128>>>(input, output, batch_size, dim);
     cudaEventRecord(end);
     cudaEventSynchronize(end);
     float time = 0;
     cudaEventElapsedTime(&time, start, end);
-    printf("softmax time: %f ms\n", time);
+    printf("reduce time: %f ms\n", time);
+}
+
+void benchmark_reduce_ref(float *input, float *output, 
+    int batch_size, int dim) {
+    cudaEvent_t start, end;
+    cudaEventCreate(&start);
+    cudaEventCreate(&end);
+    cudaEventRecord(start);
+    reduce_basic<<<batch_size, 128>>>(input, output, batch_size, dim);
+    cudaEventRecord(end);
+    cudaEventSynchronize(end);
+    float time = 0;
+    cudaEventElapsedTime(&time, start, end);
+    printf("[ref]reduce time: %f ms\n", time);
 }
 
 int main() {
     int batch_size = 1024;
     int dim = 1024;
     float *input = new float[batch_size * dim];
-    float *output = new float[batch_size * dim];
+    float *output = new float[batch_size];
+    float *output_ref = new float[batch_size];
     for (int i = 0; i < batch_size * dim; i++) {
         input[i] = static_cast<float>(rand()) / RAND_MAX;
     }
 
     float *d_input, *d_output;
     cudaMalloc(&d_input, batch_size * dim * sizeof(float));
-    cudaMalloc(&d_output, batch_size * dim * sizeof(float));
+    cudaMalloc(&d_output, batch_size * sizeof(float));
     cudaMemcpy(d_input, input, batch_size * dim * sizeof(float), cudaMemcpyHostToDevice);
 
     for (int i = 0; i < 5; i ++) {
-        benchmark_softmax(d_input, d_output, batch_size, dim);
+        benchmark_reduce(d_input, d_output, batch_size, dim);
     }
-    cudaMemcpy(output, d_output, batch_size * dim * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(output, d_output, batch_size * sizeof(float), cudaMemcpyDeviceToHost);
+
+    for (int i = 0; i < 5; i ++) {
+        benchmark_reduce_ref(d_input, d_output, batch_size, dim);
+    }
+    cudaMemcpy(output_ref, d_output, batch_size * sizeof(float), cudaMemcpyDeviceToHost);
+
+    bool all_match = true;
+    for(int i = 0; i < batch_size; i++) {
+        if(i < 10) {
+            printf("[idx-%d] GPU max = %.6f, CPU max = %.6f\n", i, output[i], output_ref[i]);
+        }
+        if(output[i] != output_ref[i]) {
+            printf("Mismatch at index %d: GPU max = %.6f, CPU max = %.6f\n", i, output[i], output_ref[i]);
+            all_match = false;
+        }
+    }
+    if(all_match) {
+        printf("All results match!\n");
+    }
+
     cudaFree(d_input);
     cudaFree(d_output);
     delete[] input;
