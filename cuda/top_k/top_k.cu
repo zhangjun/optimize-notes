@@ -83,7 +83,7 @@ __global__ void topk_stage1(const float* input, int n, float* block_out_vals, in
         // 将该 Block 的 Top-K 写入全局内存
         for (int i = 0; i < K; i++) {
             block_out_vals[blockIdx.x * K + i] = final_vals[i];
-            block_out_idxs[blockIdx.x * K + i] = finalidxs[i];
+            block_out_idxs[blockIdx.x * K + i] = final_idxs[i];
         }
     }
 }
