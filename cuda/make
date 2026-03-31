@@ -1,1 +1,0 @@
-nvcc -o d2d d2d.cu
