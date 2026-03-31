@@ -133,6 +133,110 @@ __global__ void softmax_one_warp_for_one_row(float *input, float *output,
     }
 }
 
+// Single-pass Online softmax kernel (most efficient)
+__global__ void softmax_online(float *input, float *output, int batch_size, int dim) {
+    auto block = this_thread_block();
+    int batch_idx = blockIdx.x;
+    int tid = threadIdx.x;
+    
+    if (batch_idx >= batch_size) return;
+    
+    float *row_input = input + batch_idx * dim;
+    float *row_output = output + batch_idx * dim;
+    
+    extern __shared__ float shared_data[];
+    
+    // Online algorithm for numerical stable softmax
+    float max_val = -FLT_MAX;
+    float sum_exp = 0.0f;
+    
+    // First pass: compute max and sum in a numerically stable way
+    for (int i = tid; i < dim; i += blockDim.x) {
+        float val = row_input[i];
+        float old_max = max_val;
+        max_val = fmaxf(max_val, val);
+        sum_exp = sum_exp * expf(old_max - max_val) + expf(val - max_val);
+    }
+    
+    // Store thread-local values
+    shared_data[tid] = max_val;
+    shared_data[tid + blockDim.x] = sum_exp;
+    block.sync();
+    
+    // Reduce max values
+    for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
+        if (tid < stride) {
+            float other_max = shared_data[tid + stride];
+            float other_sum = shared_data[tid + stride + blockDim.x];
+            float new_max = fmaxf(max_val, other_max);
+            sum_exp = sum_exp * expf(max_val - new_max) + 
+                     other_sum * expf(other_max - new_max);
+            max_val = new_max;
+            shared_data[tid] = max_val;
+            shared_data[tid + blockDim.x] = sum_exp;
+        }
+        block.sync();
+    }
+    
+    float global_max = shared_data[0];
+    float global_sum = shared_data[blockDim.x];
+    
+    // Second pass: compute final softmax values
+    for (int i = tid; i < dim; i += blockDim.x) {
+        row_output[i] = expf(row_input[i] - global_max) / global_sum;
+    }
+}
+
+
+#define WARP_SIZE 32
+#define NEG_INF (-1e20f)
+
+struct MD {
+    float m;  // running max
+    float d;  // running sum(exp(x - m))
+};
+
+__device__ __forceinline__ MD md_combine(const MD& a, const MD& b) {
+    MD out;
+    out.m = a.m > b.m ? a.m : b.m;
+    out.d = a.d * expf(a.m - out.m) + b.d * expf(b.m - out.m);
+    return out;
+}
+
+template <int threads_per_block = 128>
+__global__ void online_softmax_kernel(float* input, float* output, int row, int col) {
+    constexpr int warp_num = threads_per_block / WARP_SIZE;
+    int warp_id = threadIdx.x / WARP_SIZE;
+    int lane_id = threadIdx.x % WARP_SIZE;
+    int cur_row = blockIdx.x * warp_num + warp_id;
+    if (cur_row >= row) return;
+
+    const float* x = input + cur_row * col;
+    float* y = output + cur_row * col;
+
+    // 1) 每个 lane 顺序扫描自己的列分片，得到局部 (m, d)
+    MD local{NEG_INF, 0.f};
+    for (int i = lane_id; i < col; i += WARP_SIZE) {
+        MD elem{x[i], 1.f};
+        local = md_combine(local, elem);
+    }
+
+    // 2) warp 内归约，得到整行 (m, d)
+    for (int mask = WARP_SIZE / 2; mask >= 1; mask >>= 1) {
+        MD other;
+        other.m = __shfl_xor_sync(0xffffffff, local.m, mask);
+        other.d = __shfl_xor_sync(0xffffffff, local.d, mask);
+        local = md_combine(local, other);
+    }
+
+    float row_m = local.m;
+    float inv_d = 1.f / local.d;
+
+    // 3) 写回 softmax
+    for (int i = lane_id; i < col; i += WARP_SIZE) {
+        y[i] = expf(x[i] - row_m) * inv_d;
+    }
+}
 
 void benchmark_softmax(float *input, float *output, 
     int batch_size, int dim) {
