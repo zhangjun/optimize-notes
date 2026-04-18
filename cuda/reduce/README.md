@@ -137,3 +137,4 @@ for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
 ## 参考
 
 - https://github.com/BBuf/how-to-optim-algorithm-in-cuda/tree/master/reduce
+- https://medium.com/@sagargupta4you/accelerating-cuda-vector-sum-kernel-optimization-3f0dabcd8e4e
